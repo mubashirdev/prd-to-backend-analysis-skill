@@ -50,7 +50,7 @@ Produces the **backend tech analysis** a developer writes once a PRD is ready: t
   - **Red callouts** = "not ready / don't build yet" or scope caveats; **yellow callouts** = engineering notes (URL routes for Pendo, strings needing translation). Surface both.
   - Anything under **Future Ideas and Scope** is out of scope — do not design for it (note it in `## Not needed` if it shaped a decision).
 - **Calibrate:** `notion-search` for a prior "… — Backend Tech Analysis" and skim one for altitude/leanness (see the intro). Don't copy its sections — copy its terseness.
-- Create the output page with **`notion-create-pages`**, `parent` **omitted** (→ a workspace-level, owner-only page) and `properties.title = "<PRD name> — Backend Tech Analysis"`. **Capture the returned page id/URL** — you write into it in Phase 4.
+- **Find-or-create the output page** (idempotent — a re-run rewrites in place instead of spawning a duplicate, and a run that died in a later phase leaves no orphan page behind): `notion-search` for the exact title `"<PRD name> — Backend Tech Analysis"`; if an owner-owned page with that title already exists, **reuse its page id**; otherwise create it with **`notion-create-pages`**, `parent` **omitted** (→ a workspace-level, owner-only page) and that title. Capture the page id/URL — Phase 4 pushes with `replace_content`, so reusing an existing page cleanly overwrites any stale content.
 - **Stage the PRD for the fan-outs:** `Write` the ingested PRD + relevant sub-pages, as a concise requirements digest, to a temp file **`prd-digest.md`**. Spawned explorer/reviewer agents can't reach Notion, so this file (not Notion) is the PRD source for Phases 3 and 5.
 - Incomplete / "stakeholder review" PRD → proceed best-effort, note gaps in To be discussed. If a proven prototype/POC exists, treat it as the algorithm reference and frame the analysis as the **port** into the backend.
 
@@ -59,13 +59,13 @@ Orient from the module-map `CLAUDE.md` + the relevant module's `CLAUDE.md`. All 
 
 Run **two waves** — because which deep explorers you need *depends on facts you don't have yet*. Don't guess the fan-out up front; let wave 1 decide it.
 
-**Wave 1 — orient & trace (always these three):**
+**Wave 1 — orient & trace (always these four):**
 - Owning service + data model + where config/state lives (and its limits, e.g. a `TEXT` cap); the closest CRUD/flow prior-art to mirror end-to-end.
+- **Persistence & migrations** — first-class: nearly every feature persists, so **always** trace where/how this feature's data is stored (Sequelize/Dynamoose conventions), don't leave it to a conditional deep-dive. Surface **migration safety** when it alters a large existing table (additive-nullable-then-backfill vs a blocking `ALTER`); detail it in the doc.
 - **The write path, traced.** Find the write call site and follow it: direct repository write (sync) **or** an enqueue (SQS → streamer → Redis → reindex, async)? This single fact gates wave 2 — **never infer async-ness from the feature category.**
 - Existing routes + the exact ACL/permission pattern (which policy gates what).
 
 **Wave 2 — deep dives, spawned from wave-1 findings (only the ones that apply):**
-- **Persistence & migrations** — Sequelize/Dynamoose conventions, and **migration safety** if it alters a large existing table (online DDL / additive-nullable-then-backfill vs a blocking `ALTER`).
 - **Serializer/resource layer** — does it reshape payloads, read Redis, generate URLs? (a classic non-inert "reuse").
 - **Search** *(if wave 1 found an index touch)* — index mapping, analyzer, reindex/backfill, `create-index` script.
 - *(If wave 1 traced async)* SQS/Lambda patterns + naming + the closest queue's config; **handler idempotency** (the ~3-retry standard means a job WILL re-run — what makes re-execution safe?); the real-time/socket delivery path + channel convention.
@@ -114,6 +114,7 @@ Intro: service + ACL policy + scoping + the per-route tenancy lookup (verify the
 - `## Not needed` — explicitly record deliberate absences (OpenSearch none? new vendor none? rate limit none? Future-Scope items deferred?).
 
 ### # Business logic / flow
+Diagram convention: render any flow diagram as a **`mermaid` fenced code block** (Notion renders it natively); skip the diagram on a single-hop flow.
 - *async:* `## <Flow> — <lambda> lambda` — flow diagram + `###` steps with real call shapes (structured-output schema / scoring only **if AI**).
 - *sync:* `## <Operation> — <service> service` — the route → controller → repository → serializer → search chain with real call shapes; a flow diagram only when there's >1 hop or a fan-out.
 
