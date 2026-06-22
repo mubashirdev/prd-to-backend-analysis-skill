@@ -1,129 +1,117 @@
 ---
-name: prd-tech-analysis
-description: Use when the user shares a PRD (Notion link or text) and wants a technical analysis / tech design / engineering breakdown. Produces a codebase-grounded analysis doc only (API, Payload, Architecture, the actual files/changes, TBD, cross-service changes, testing scope) — it does NOT write implementation code.
+name: prd-to-backend-analysis
+description: Use when the user gives a PRD Notion link and asks for a backend tech analysis, says "PRD to backend analysis", or starts a flight's BE analysis. Trigger: /prd-to-backend-analysis <prd-link>. Backend only. Do NOT use for frontend analysis, finalizing/implementing an already-approved analysis, or a quick feasibility/effort opinion (use `assess`). Heavyweight: it mutates git state and creates a Notion page.
 ---
 
-# PRD Tech Analysis
+# PRD → Backend Tech Analysis
 
-## Overview
+Produces the **backend tech analysis** a developer writes once a PRD is ready: the manager + FE review it, the team socializes the open decisions, then development proceeds against it. **Backend only** — you don't design the FE, but you DO specify the surfaces FE builds against (routes + socket payloads, when the feature has them).
 
-Turn a product PRD into a concrete technical analysis. **This skill produces the analysis doc only — it never writes implementation code.** The analysis is **grounded in the actual codebase** — it reuses existing endpoints, table conventions, queue/lambda naming, and event-payload shapes rather than inventing new ones, and it names the actual files that must change. Grounding in what already exists IS the discipline that keeps the design from being over-engineered.
+Anchor on the *AI Agents: Instruction Validator* analysis for **altitude and leanness — not its section inventory**. Include only the sections this PRD's backend actually needs, and **derive sync-vs-async from the code, never from the feature category** — e.g. a "search field" write may be a direct index write OR a queued reindex (SQS → streamer lambda → Redis → reindex); trace the actual path before deciding which sections exist.
 
-## Process
+## Prerequisites
+- The Notion MCP (`mcp__claude_ai_Notion__*`) must be connected, with **write** tools allowlisted: `notion-create-pages`, `notion-update-page` (plus `notion-fetch`, `notion-search`). Without them the first write halts the autonomous run on a permission prompt.
+- Fan-out uses the **`Workflow`** tool (this skill instructing it is valid opt-in). If `Workflow` isn't available, fall back to dispatching parallel **`Agent`** subagents with the same per-agent contract.
 
-```dot
-digraph prd {
-    "Read the FULL PRD" -> "Read the actual codebase for conventions";
-    "Read the actual codebase for conventions" -> "Map each requirement to a concrete technical change";
-    "Map each requirement to a concrete technical change" -> "Write analysis in the house format";
-    "Write analysis in the house format" -> "Name the actual files + changes";
-    "Name the actual files + changes" -> "List open questions as TBD with product";
-    "List open questions as TBD with product" -> "Publish to Notion + present";
-}
-```
+## Operating rules
+- **Run autonomously.** Don't stop to ask clarifying questions. Unsure, or a product/business judgment → a **To be discussed** row (with a recommendation), never a blocker. (Legitimate hard stops: a relevant-dirty git tree, or an unusable/inaccessible PRD link — see the phases.)
+- **Backend only.** Don't design FE UX; do specify routes (method · path · ACL · request · response) and socket payloads when present — that's the FE contract.
+- **Standardize on existing patterns.** Find the closest precedent in the repo and mirror it; call out what you're mirroring. Prefer reuse over invention.
+- **Verify against code (`file:line`).** Never assert behavior you haven't read. A "reused" route/model/serializer is frequently NOT inert — hidden background LLMs, serializers that reshape the payload or read Redis, async double-writes. Read it before depending on it. **`@respond-io/*` packages may not be installed** — verify their behavior from in-repo **call sites** (e.g. `OrganizationQuotaUsage` usage in a lambda manager, `POLICY_TYPES` in a routes file), or `npm install` the owning module only if you genuinely need package internals.
+- **Never fabricate numbers** (cost, latency, pricing). Frame cost as token-volume × calls, leave rates to fill in, and mirror sizing (e.g. timeouts, memory) from the closest existing resource.
+- **Team standards:**
+  - *Universal:* soft-delete via Sequelize **`paranoid: true`** (manages the `deletedAt` column); ACL via `@respond-io/access-control` (`MANAGER_ACCESS` etc.); tenancy scoped to `req.space` and verified per route.
+  - *Conditional (only if the feature uses them):* SQS retry is the standard **`ReportBatchItemFailures` (`batchItemFailures`) + `VisibilityTimeout` + `MessageRetentionPeriod`, ~3 retries per job, no DLQ** — just apply it; credits via `OrganizationQuotaUsage` (atomic in-lambda, refund on failure); a Redis lock for user-triggered long-running jobs.
+- **Lean.** Code blocks and tables over paragraphs. Omit a section entirely when it doesn't apply — never emit "N/A" filler; `## Not needed` is the one place to record deliberate absences.
+- **Plugin-portable.** No user-specific absolute paths. Find the repo from the working dir; reach Notion via the connected MCP.
 
-This skill stops at the analysis. It does **not** write implementation code — even if the PRD is small or the change looks obvious.
+## Checklist — create a TodoWrite todo per phase, complete in order
+1. Pre-flight
+2. Ingest PRD
+3. Explore codebase (Workflow fan-out)
+4. Draft into Notion
+5. Review + validate-and-fill loop (Workflow fan-out, ≤ 5 rounds)
+6. Present
 
-**Where to deliver:** default is a **private Notion doc** created via the Notion MCP (`notion-create-pages`), matching the house format below. Drafting locally first as `.md` is fine, but the deliverable lives in Notion. Confirm the parent/workspace if it's not obvious.
+## Phase 1 — Pre-flight
+- **Two roots — don't conflate them:** the **module-map dir** = the dir holding the module-map `CLAUDE.md` (often the cwd, e.g. `…/service`); the **git root** = `git rev-parse --show-toplevel`, which may be an **ancestor** of it. Run all git commands at the **git root**, and remember its `git status` paths are git-root-relative (so a module appears as e.g. `service/workflows/`).
+- If not on `dev`, `git checkout dev`; then `git pull --ff-only`.
+- **Dirty-tree rule:** hard-stop **only** if *tracked* files under the modules you'll analyze are uncommitted — `git -C <gitroot> status --porcelain -- <gitroot-relative module dirs>`. **Tolerate** untracked files and edits unrelated to the analysis, including a modified module-map `CLAUDE.md` (read its working-tree copy as-is). Already on `dev`, nothing relevant dirty → proceed.
+- If `git pull` fails (diverged / conflict / no network / auth — possibly from sibling trees outside your modules): do **not** abort — proceed read-only against current `HEAD` and add a To-be-discussed row noting the analysis ran against possibly-stale local code.
+- Only on a relevant-dirty tree: stop, name the blocking tracked files, ask the user to commit/stash. Never auto-stash.
 
-### Step 1: Read the full PRD
+## Phase 2 — Ingest PRD  (all Notion access stays in the main agent)
+- Fetch the PRD link via `notion-fetch`. **If it returns access-denied / not-found / empty → STOP and report the exact link + error** (unusable input — a legitimate stop).
+- Follow linked/child sub-pages that matter to the backend (design docs, prompt pages, decision-item DBs): extract child page ids from the fetch result and re-fetch them (cap depth ~1–2). A fetch too large to read inline is saved to a file by the tool — `Read`/slice it, or hand the path to a subagent; don't skip it.
+- **Read the PRD structure, not just the prose.** Respond.io PRDs are usually: Overview → Problem Definition → Scope Summary (**Must Have** / **Future Ideas**) → numbered functional Sections → data-contract tables → callouts → Decision Items. When parsing:
+  - The atomic requirement unit is **screen → UI element → {Text/Label, Location, Action, Behaviour}** nested in `<details>` blocks. Treat the **`Behaviour:`/`Behavior:`** bullets as the implicit acceptance criteria — there are rarely `As a user…` stories or explicit acceptance-criteria headings.
+  - **Tables** carry the data contracts (events, properties, permission matrices) — extract them as contracts, not prose.
+  - **Red callouts** = "not ready / don't build yet" or scope caveats; **yellow callouts** = engineering notes (URL routes for Pendo, strings needing translation). Surface both.
+  - Anything under **Future Ideas and Scope** is out of scope — do not design for it (note it in `## Not needed` if it shaped a decision).
+- Create the output page with **`notion-create-pages`**, `parent` **omitted** (→ a workspace-level, owner-only page) and `properties.title = "<PRD name> — Backend Tech Analysis"`. **Capture the returned page id/URL** — you write into it in Phase 4.
+- **Stage the PRD for the fan-outs:** `Write` the ingested PRD + relevant sub-pages, as a concise requirements digest, to a temp file **`prd-digest.md`**. Spawned explorer/reviewer agents can't reach Notion, so this file (not Notion) is the PRD source for Phases 3 and 5.
+- Incomplete / "stakeholder review" PRD → proceed best-effort, note gaps in To be discussed. If a proven prototype/POC exists, treat it as the algorithm reference and frame the analysis as the **port** into the backend.
 
-Notion PRDs are large and structured as: Overview → Problem Definition → Scope Summary (Must Have / Future Ideas) → numbered functional Sections → data-contract tables → callouts → Decision Items.
+## Phase 3 — Explore the codebase (Workflow fan-out)
+Orient from the module-map `CLAUDE.md` + the relevant module's `CLAUDE.md`. Then run a **Workflow** of parallel **read-only** explorers (one per topic below), each working from the **repo + `prd-digest.md`** (staged in Phase 2; never the Notion MCP — spawned agents may not have it). Each returns a fixed structured shape: `{ area, summary, keyFiles:[{path, role}], facts:[<with file:line>], patterns:[…], gaps:[…] }`. Scale the fan-out to the PRD, but **never infer async-ness from the feature category — trace it.** The search explorer must follow the actual write path (direct index write vs a queued SQS → streamer → Redis → reindex flow); the async explorers are conditional on what that trace finds, not on whether the feature "sounds" like CRUD:
+- Owning service + data model + where config/state lives (and its limits, e.g. a `TEXT` cap).
+- **Persistence & migrations** (Sequelize/Dynamoose conventions) — first-class.
+- **Serializer/resource layer** — does it reshape payloads, read Redis, generate URLs? (a classic non-inert "reuse").
+- **Search** — does the feature touch OpenSearch (index mapping, analyzer, reindex/backfill, `create-index` script)?
+- Existing routes + the exact ACL/permission pattern (which policy gates what); the closest CRUD/flow prior-art to mirror end-to-end.
+- **Cross-service ripple** — a new actor/field/capability often touches services the PRD never names. Trace, for THIS feature: does it count toward billing/plan limits? appear in user/assignee dropdowns or pickers? show in reports, data export, or super-admin? get gated by a permission? emit/consume events other services read? Don't reuse a fixed checklist — derive it from what this feature actually introduces.
+- *(If async)* SQS/Lambda patterns + naming + the closest queue's config; the real-time/socket delivery path + channel convention.
+- *(If AI)* existing LLM infra (`@respond-io/ai` / `@respond-io/ai-agent`) — models, structured-output support, credit/tracing — from in-repo call sites.
 
-- Fetch with the Notion MCP. If the result exceeds the token limit, it's saved to a file — slice it in ~80k-char spans via python, or dispatch a subagent to extract it so it stays out of main context.
-- The atomic requirement unit is **screen → UI element → {Text/Label, Location, Action, Behaviour}** nested bullets inside `<details>` blocks. Treat `Behaviour:`/`Behavior:` bullets as the implicit acceptance criteria — there are usually no `As a user...` stories or explicit acceptance-criteria headings.
-- **Tables** carry the data contracts (events, properties, permission matrices). Parse them separately from prose.
-- **Red callouts** = "not ready, don't build yet" / scope caveats. **Yellow callouts** = engineering notes (URL routes for Pendo, strings needing translation). Surface both.
-- Anything marked **Future Ideas and Scope** is out of scope — do not design for it.
+Synthesize before drafting; the design must be grounded in what exists.
 
-### Step 2: Read the actual codebase (MANDATORY)
+## Phase 4 — Draft into Notion
+Write into the page (captured in Phase 2) with **`notion-update-page`**: `command: insert_content` (pass `content`) to fill, or `command: replace_content` (pass `new_str`; set `allow_deleting_content` only deliberately) to rewrite. Use the **adaptive template** below.
+Conventions: when an entity is **reused as-is**, say so; when **reused but modified**, mark the modified parts; **`~~strikethrough~~`** any existing table/route/field the new design supersedes, and **✅** anything the PRD says already exists/landed.
+Notion-flavored-markdown gotchas: toggle headings use `{toggle="true"}` and their children **must be tab-indented** (fence lines carry the indent; code content sits flush-left); tables use `<table>`/`<tr>`/`<td>`; keep every JSON payload **clean multi-line** (one field per line) so it doesn't overflow. If unsure of syntax, read the spec via `ReadMcpResourceTool(server="claude_ai_Notion", uri="notion://docs/enhanced-markdown-spec")` — do **not** route that URI through `notion-fetch`.
 
-First decide what kind of PRD this is:
-- **Existing-feature update** — find the current implementation and frame the analysis as deltas to it (which files/endpoints/tables change, what's added/removed). Read the existing code before proposing changes.
-- **New feature** — find the closest existing feature and follow its conventions.
+## Phase 5 — Review + validate-and-fill loop
+Stage the drafted doc to `draft.md` (reuse `prd-digest.md` from Phase 2). Run a **Workflow** of 5 **read-only** reviewer lenses, each reading those files AND verifying against the repo (`file:line`), each returning `{ lens, gaps:[{title, severity, where, problem, recommendation}], verdict }`:
+1. PRD coverage · 2. Concurrency & correctness · 3. API & data contract · 4. Security / ACL / tenancy / cost · 5. Ops / failure / rollout.
 
-Then find how the codebase already does each thing the PRD needs:
+Reviewers **return findings only — the main agent applies all Notion edits** (subagents don't edit the draft). For each finding: correctness/contract gap with a clear best answer → **fill the doc**; product/business-judgment or genuinely uncertain → **To-be-discussed row** (with a recommendation). Auto-fix high+medium; low → note.
+**Loop:** track the round in TodoWrite and keep a seen-set of findings (dedup by `where`+claim). After filling, re-run the review; **stop when a round surfaces no new high/medium findings, hard cap 5 rounds** — at the cap, dump any remaining findings into To be discussed rather than looping.
 
-- **Endpoints** — does one already exist you can extend? (e.g. add fields to `PUT /workspace/settings` instead of a new endpoint; add a `?type=all` param to `GET /workspace/users` instead of a parallel route.)
-- **Tables** — match existing column conventions, FK targets (e.g. `spaceId` → `bot(id)`), soft-delete via `deletedAt`, `createdAt`/`updatedAt` defaults.
-- **Queues / Lambdas** — match the existing naming pattern (`<environment>--ms-...-queue`, `<environment>--ms-...`).
-- **Events / payloads** — match the shape of existing chat-activity events (`contactId`, `conversationId`, `eventType`, `payload`, `source`).
-- **Internal packages** — `@respond-io/*` packages live on the **respond-io GitHub org**, not just `node_modules`. Fetch the source from there (`gh`) when the analysis depends on a package's real types/shape.
-- **End-to-end flow** — a feature usually spans service → lambda → consumer. Trace the whole path, not just the entry point.
+## Phase 6 — Present
+Give the user the Notion link + a tight summary of what landed and the open **To be discussed** items. **Terminal state = a draft with `_pending_` decisions.** Do NOT proceed to implementation or invoke implementation skills.
 
-If you skip this step the analysis will invent new infrastructure the codebase doesn't need.
+---
 
-### Step 3: Write the analysis in the house format
+## Output document template (adaptive — include only what the PRD needs)
+H1 (`#`) top sections, H2 (`##`) groups, H3 (`###`) toggles for long code/JSON (each route, each socket payload). Start with `<table_of_contents/>`. Order:
 
-Mirror the structure below. Mark items already done with ✅. Use `{toggle="true"}` headings and `<details>` for samples (Notion-friendly). Strike through (`~~Name~~`) any existing table/endpoint the new design supersedes.
+### # Frontend API contract  *(if the feature exposes routes/sockets — put it FIRST)*
+Intro: service + ACL policy + scoping + the per-route tenancy lookup (verify the entity belongs to the caller's space before any work) + plan gate.
+- `## Routes` — `### <name> {toggle="true"}` each: method · path · request body · `2xx` + every error response.
+- `## Socket` *(if any)* — an envelope code block (`channel`/`name`/`envelope`, one field per line), then `### <EventType> {toggle="true"}` each with clean multi-line JSON.
 
-```markdown
-<table_of_contents />
+### # Infrastructure  *(describe each NEW resource concretely — the manager's inventory)*
+- `## Database` *(if persistence)* — table columns + **indexes sized to the real reads** + soft-delete (`paranoid: true`) + relationship (1-to-1 vs 1-to-many) and upsert/insert behavior; why this store.
+- `## Search (OpenSearch)` *(if used)* — index/alias, mapping + analyzer for new fields, write path (sync vs queued reindex), backfill/reindex plan for existing docs.
+- `## SQS` *(if async)* — queue names + the standard retry (`ReportBatchItemFailures`, ~3 retries, `VisibilityTimeout` + `MessageRetentionPeriod`, no DLQ) + BatchSize.
+- `## Lambda` *(if async)* — function names + sizing; reference the flow section for logic.
+- `## Redis` *(if used)* — keys, values, TTL, lock semantics; any new cache primitive needed.
+- `## Access & cost` — tenancy + plan gate (universal); credit gating (where it decrements + refunds) and lock-concurrency *(only if applicable)*.
+- `## Cross-service impact` *(if it ripples)* — per affected service, what must change there and why (billing/plan limits, auth/login, dropdowns & pickers, reports, data export, super-admin, permissions, events other services consume). Derived fresh per PRD — see Phase 3.
+- `## Rollout & observability` — feature-flag/dark-launch lever, structured job logs + a CloudWatch metric/alarm.
+- `## Workspace code changes (not infra)` — new routes, socket classes, Segment events (with userId + orgId).
+- `## Not needed` — explicitly record deliberate absences (OpenSearch none? new vendor none? rate limit none? Future-Scope items deferred?).
 
-# API
-## <Verb-phrase describing the endpoint> {toggle="true"}
-	**POST** `/path`
-	<details><summary>Sample request</summary> ```json ... ``` </details>
-	<details><summary>Sample response</summary> ```json ... ``` </details>
-	(Note when reusing an existing endpoint, e.g. "Existing space settings endpoint with new properties.")
+### # Business logic / flow
+- *async:* `## <Flow> — <lambda> lambda` — flow diagram + `###` steps with real call shapes (structured-output schema / scoring only **if AI**).
+- *sync:* `## <Operation> — <service> service` — the route → controller → repository → serializer → search chain with real call shapes; a flow diagram only when there's >1 hop or a fan-out.
 
-# Payload
-## Sender                  -- how this actor is identified on messages/events
-## <Event> events          -- one <details> per event the feature emits, with sample JSON
-## Prompt / Actions        -- LLM prompt template + each action's shape, if relevant
+### # Testing
+- `## Integration tests {toggle="true"}` — mock the heavy/expensive infra; call cheap real services at the boundary; **state which is which for THIS feature** (AI: mock DB/SQS/socket/Redis, call the LLM for real but self-skip when the API key is absent; search: test-index vs mocked search repo). Describe *what* to test, not the test framework — the runner is implementation, out of scope for the analysis.
+- `## QA testing {toggle="true"}` — manual scenarios.
 
-# Architecture
-## SQS    -- queue name(s)
-## Lambda -- lambda name(s) + <details> Payload
-## Tables -- per table: <details> Schema (CREATE TABLE ...) + <details> Sample (JSON row)
+### # To be discussed
+Intro: "Fill the Decision column once agreed — the development agent reads decisions from here." A `<table>`: `# | Topic | Recommendation | Decision`, each Decision `_pending_`. Only genuinely-open items; move ambiguous/non-user-facing design choices here.
 
-# Files & Changes    -- the actual code touchpoints
-## <service / package>
-	- `path/to/file.js` — what changes and why (new endpoint handler, new column, event emit, etc.)
-	- new file `path/to/new.js` — what it does
-
-# TBD with product   -- numbered open questions that block or need a product decision
-
-# Changes and Q&A    -- cross-service ripple: what OTHER services/teams must change
-## <Service / owner>
-	- <what must change there and why>
-
-# Testing scope
-```
-
-Not every section applies to every PRD — drop the ones with nothing in them. Keep samples realistic (real field names from the codebase), not placeholder lorem.
-
-**`# Files & Changes` is required.** Name the actual files (paths) that must change and what each change is — this is the bridge from design to a buildable task. For an existing-feature update, frame these as deltas to the current code you read in Step 2.
-
-**`# Changes and Q&A` is the cross-service hunt — derived fresh per PRD.** A new actor, field, or capability often ripples into services the PRD never mentions. Don't reuse a fixed checklist; reason from THIS feature: what other services read/write this data, list it in dropdowns or reports, count it for billing/limits, export it, or gate it by permission? List each impacted service and what must change there.
-
-### Step 4: TBD with product
-
-Every ambiguity, contested wording (Notion discussion threads), or behaviour the PRD leaves open goes here as a numbered question. Don't guess and bury the assumption — surface it.
-
-### Step 5: Publish and present
-
-Publish the analysis to the private Notion doc and present it. **The skill ends here — do not write implementation code.** If the user wants it built afterward, that's a separate request.
-
-## Keep the design small (not over-engineered)
-
-The changes you recommend in the analysis should be the **smallest reasonable change**:
-
-- Extend existing endpoints/tables/queues before proposing new ones.
-- **No premature abstraction** — don't propose interfaces, factories, base classes, or generics unless two concrete callers need them now.
-- **No speculative config, feature flags, or extensibility hooks** for Future-Scope items.
-- Recommend changes that match the conventions already in the target file/package.
-
-## Common Mistakes
-
-| Mistake | Fix |
-|---------|-----|
-| Designing API/tables from the PRD alone | Read the codebase first — reuse what exists |
-| Inventing a new endpoint for a small addition | Add fields/params to the existing one |
-| Designing for "Future Ideas and Scope" items | Those are explicitly out of scope — ignore them |
-| Treating only headings as requirements | The `Behaviour:` bullets are the real acceptance criteria |
-| Skipping `# TBD with product` | Open questions buried as silent assumptions cause rework |
-| Writing implementation code | This skill is analysis only — stop at the doc |
-| Vague "update the X service" | Name the actual file paths in `# Files & Changes` |
-| Reusing a fixed cross-service checklist | Derive the ripple fresh from THIS feature |
-| Proposing layers/abstractions "for later" | Smallest design now; abstract only with 2+ real callers |
+## Cut-list — never include
+No "Goal" preamble. No standalone "Security/Scalability/Reliability" section (fold specific, non-default items into Infrastructure). No "Effects on other areas / scope" chatter. No "Implementation notes". No redundant "LLM models" section (fold model choice into a code block + a To-be-discussed row).
