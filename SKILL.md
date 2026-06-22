@@ -23,7 +23,9 @@ Produces the **backend tech analysis** a developer writes once a PRD is ready: t
 - **Team standards:**
   - *Universal:* soft-delete via Sequelize **`paranoid: true`** (manages the `deletedAt` column); ACL via `@respond-io/access-control` (`MANAGER_ACCESS` etc.); tenancy scoped to `req.space` and verified per route.
   - *Conditional (only if the feature uses them):* SQS retry is the standard **`ReportBatchItemFailures` (`batchItemFailures`) + `VisibilityTimeout` + `MessageRetentionPeriod`, ~3 retries per job, no DLQ** — just apply it; credits via `OrganizationQuotaUsage` (atomic in-lambda, refund on failure); a Redis lock for user-triggered long-running jobs.
-- **Lean.** Code blocks and tables over paragraphs. Omit a section entirely when it doesn't apply — never emit "N/A" filler; `## Not needed` is the one place to record deliberate absences.
+- **Show the artifact, don't describe it.** Every contract is a fenced code block of the REAL shape, not prose. That means: each route with a **Sample request** + **Sample response** JSON; each event/webhook with its full payload JSON (provider→platform notification, the enqueued SQS message, the unified internal message, and any event emitted); each new/changed DB row as `CREATE TABLE` + a sample row; each new constant/enum addition shown as the literal line added; each new file shown as a short skeleton of its key method(s) and the exact object it builds. "Mirror gmail" / "see X" is NOT acceptable for a core contract — paste the concrete shape the dev will write. The bar is the sample *Ai Agent analysis* doc: dense with real JSON and schemas.
+- **Cover everything — the doc is build-ready.** A developer must be able to implement the whole in-scope feature from this doc WITHOUT re-reading the codebase. Enumerate every file to change with the concrete change (not "and others"); every payload at every hop; every package (`@respond-io/*`) edit with the literal additions; every cross-service enum entry. Gaps/uncertainties go to **To be discussed** — but a known contract is never left as a pointer.
+- **Lean in prose, complete in artifacts.** Tables and code blocks over paragraphs; cut narration, hedging, and restated PRD. Omit a whole section only when the feature truly doesn't use it (`## Not needed` records deliberate absences) — but never omit or abbreviate a payload/schema/file-shape to "stay lean". Concrete contracts are the point, not bloat.
 - **Plugin-portable.** No user-specific absolute paths. Find the repo from the working dir; reach Notion via the connected MCP.
 
 ## Checklist — create a TodoWrite todo per phase, complete in order
@@ -81,8 +83,8 @@ Conventions: when an entity is **reused as-is**, say so; when **reused but modif
 Notion-flavored-markdown gotchas: toggle headings use `{toggle="true"}` and their children **must be tab-indented** (fence lines carry the indent; code content sits flush-left); tables use `<table>`/`<tr>`/`<td>`; keep every JSON payload **clean multi-line** (one field per line) so it doesn't overflow. If unsure of syntax, read the spec via `ReadMcpResourceTool(server="claude_ai_Notion", uri="notion://docs/enhanced-markdown-spec")` — do **not** route that URI through `notion-fetch`.
 
 ## Phase 5 — Review + validate-and-fill loop
-Reviewers read `draft.md` + `prd-digest.md` AND verify against the repo (`file:line`). Run a **Workflow** of 5 **read-only** reviewer lenses, each returning `{ lens, gaps:[{title, severity, where, problem, recommendation}], verdict }`:
-1. PRD coverage · 2. Concurrency, correctness & **idempotency** (retried jobs, double-writes, race on the credit/lock) · 3. API & data contract · 4. Security / ACL / tenancy / cost · 5. Ops / failure / rollout / **migration safety**.
+Reviewers read `draft.md` + `prd-digest.md` AND verify against the repo (`file:line`). Run a **Workflow** of 6 **read-only** reviewer lenses, each returning `{ lens, gaps:[{title, severity, where, problem, recommendation}], verdict }`:
+1. PRD coverage · 2. Concurrency, correctness & **idempotency** (retried jobs, double-writes, race on the credit/lock) · 3. API & data contract · 4. Security / ACL / tenancy / cost · 5. Ops / failure / rollout / **migration safety** · 6. **Completeness & concreteness critic** — hunt what the doc describes in prose but does NOT show as a concrete artifact (a missing payload JSON, a missing sample request/response, a missing package-change literal, a file in the flow that's absent from `# Files & changes`, a "mirror X"/"see X" left as a pointer). Every such omission is a finding; the bar is "a dev can build it all from this doc without re-reading the codebase."
 
 **Verify before you fill.** A reviewer's gap is a claim, not a fact — plausible-but-wrong findings will corrupt the doc if applied blindly. For each high/medium finding, do a cheap adversarial check: does it actually reproduce at the cited `file:line`? If it doesn't hold, drop it. Reviewers **return findings only — the main agent applies all edits to `draft.md`, then re-pushes via `replace_content`** (subagents touch neither the file nor Notion). For each surviving finding: correctness/contract gap with a clear best answer → **fill the doc**; product/business-judgment or genuinely uncertain → **To-be-discussed row** (with a recommendation). Auto-fix high+medium; low → note.
 **Loop:** track the round in TodoWrite and keep a seen-set of findings (dedup by `where`+claim). After filling, re-run the review; **stop when a round surfaces no new high/medium findings, hard cap 5 rounds** — at the cap, dump any remaining findings into To be discussed rather than looping.
@@ -97,8 +99,17 @@ H1 (`#`) top sections, H2 (`##`) groups, H3 (`###`) toggles for long code/JSON (
 
 ### # Frontend API contract  *(if the feature exposes routes/sockets — put it FIRST)*
 Intro: service + ACL policy + scoping + the per-route tenancy lookup (verify the entity belongs to the caller's space before any work) + plan gate.
-- `## Routes` — `### <name> {toggle="true"}` each: method · path · request body · `2xx` + every error response.
+- `## Routes` — `### <METHOD path> {toggle="true"}` each, with method · path · ACL · and **a `<details>` Sample request + a `<details>` Sample response (real JSON, success + every error)** — exactly like the sample analysis's `# API` section. Mark reused endpoints ✅ and note what's being extended.
 - `## Socket` *(if any)* — an envelope code block (`channel`/`name`/`envelope`, one field per line), then `### <EventType> {toggle="true"}` each with clean multi-line JSON.
+
+### # Payloads  *(REQUIRED whenever the feature has webhooks, queues, events, or provider calls)*
+The contract at every hop, as real JSON. Mirror the sample analysis's `# Payload` section. Include each that applies, in `### <name> {toggle="true"}` blocks:
+- **Inbound webhook** — the exact provider→platform notification body (e.g. the Graph change-notification JSON, validation-handshake request).
+- **Provider request/response** — the outbound call to the external API (e.g. Graph `sendMail` body) and its response.
+- **Queue messages** — the JSON enqueued to each SQS queue (inbound webhook queue, outbound send queue) — one field per line.
+- **Unified internal shape** — how the message/event is normalized into the platform's internal format (the `type`, all fields).
+- **Emitted events** — any chat-activity/Segment/domain event the flow fires, full payload (Segment: include userId + orgId).
+Never describe a payload in prose ("subject, cc, bcc…") — paste the JSON.
 
 ### # Infrastructure  *(describe each NEW resource concretely — the manager's inventory)*
 - `## Database` *(if persistence)* — table columns + **indexes sized to the real reads** + soft-delete (`paranoid: true`) + relationship (1-to-1 vs 1-to-many) and upsert/insert behavior; why this store. **Migration:** new table vs altering an existing one — if altering a large table, the safe path (additive nullable column → backfill → enforce) not a blocking `ALTER`.
@@ -109,14 +120,17 @@ Intro: service + ACL policy + scoping + the per-route tenancy lookup (verify the
 - `## External integration` *(if a new vendor/external API)* — endpoint(s) · auth · request/response shape · the exact model-id/version, each **citing the official doc URL + date checked** (per the lookup rule). Flag rate limits and where the secret/key lives.
 - `## Access & cost` — tenancy + plan gate (universal); credit gating (where it decrements + refunds) and lock-concurrency *(only if applicable)*.
 - `## Cross-service impact` *(if it ripples)* — per affected service, what must change there and why (billing/plan limits, auth/login, dropdowns & pickers, reports, data export, super-admin, permissions, events other services consume). Derived fresh per PRD — see Phase 3.
+- `## Package changes (@respond-io/*)` *(if a shared package changes)* — these are sibling source repos compiled into `node_modules`; the edit lands in the source repo and is **republished + version-bumped**, never edited in `node_modules`. Show the **literal additions** (the exact `SOURCE`/enum lines, the new registry-map entry) and a short skeleton of any new package class. Note the publish-before-deploy sequencing.
 - `## Rollout & observability` — feature-flag/dark-launch lever, structured job logs + a CloudWatch metric/alarm.
-- `## Workspace code changes (not infra)` — new routes, socket classes, Segment events (with userId + orgId).
 - `## Not needed` — explicitly record deliberate absences (OpenSearch none? new vendor none? rate limit none? Future-Scope items deferred?).
 
 ### # Business logic / flow
 Diagram convention: render any flow diagram as a **`mermaid` fenced code block** (Notion renders it natively); skip the diagram on a single-hop flow.
-- *async:* `## <Flow> — <lambda> lambda` — flow diagram + `###` steps with real call shapes (structured-output schema / scoring only **if AI**).
-- *sync:* `## <Operation> — <service> service` — the route → controller → repository → serializer → search chain with real call shapes; a flow diagram only when there's >1 hop or a fan-out.
+- *async:* `## <Flow> — <lambda> lambda` — flow diagram + `###` steps, each step showing the **real payload it produces/consumes** (link the shapes in `# Payloads`; structured-output schema / scoring only **if AI**).
+- *sync:* `## <Operation> — <service> service` — the route → controller → repository → serializer → search chain with the real object at each hop; a flow diagram only when there's >1 hop or a fan-out.
+
+### # Files & changes  *(REQUIRED — the exhaustive changeset)*
+A `<table>` `File | New/Modified | Change` listing **every** file the dev touches across services + lambdas + packages — no "and others", no omissions. For a new file, name the key method(s) + the object it builds; for a modified file, the exact edit (the enum line added, the branch widened, the case added) with `file:line`. This is the build checklist; if it's not here, it won't get built.
 
 ### # Testing
 - `## Integration tests {toggle="true"}` — mock the heavy/expensive infra; call cheap real services at the boundary; **state which is which for THIS feature** (AI: mock DB/SQS/socket/Redis, call the LLM for real but self-skip when the API key is absent; search: test-index vs mocked search repo). Describe *what* to test, not the test framework — the runner is implementation, out of scope for the analysis.
