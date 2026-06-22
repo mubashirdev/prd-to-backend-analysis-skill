@@ -7,7 +7,7 @@ description: Use when the user gives a PRD Notion link and asks for a backend te
 
 Produces the **backend tech analysis** a developer writes once a PRD is ready: the manager + FE review it, the team socializes the open decisions, then development proceeds against it. **Backend only** — you don't design the FE, but you DO specify the surfaces FE builds against (routes + socket payloads, when the feature has them).
 
-Anchor on the *AI Agents: Instruction Validator* analysis for **altitude and leanness — not its section inventory**. Include only the sections this PRD's backend actually needs, and **derive sync-vs-async from the code, never from the feature category** — e.g. a "search field" write may be a direct index write OR a queued reindex (SQS → streamer lambda → Redis → reindex); trace the actual path before deciding which sections exist.
+**Calibrate altitude from a real sibling, not a hard-coded name.** In Phase 2, `notion-search` for an existing "… — Backend Tech Analysis" page and skim one for **altitude and leanness — not its section inventory** (the *AI Agents: Instruction Validator* analysis is a good one if it surfaces; if none surfaces, fall back to the template below). Include only the sections this PRD's backend actually needs, and **derive sync-vs-async from the code, never from the feature category** — e.g. a "search field" write may be a direct index write OR a queued reindex (SQS → streamer lambda → Redis → reindex); trace the actual path before deciding which sections exist.
 
 ## Prerequisites
 - The Notion MCP (`mcp__claude_ai_Notion__*`) must be connected, with **write** tools allowlisted: `notion-create-pages`, `notion-update-page` (plus `notion-fetch`, `notion-search`). Without them the first write halts the autonomous run on a permission prompt.
@@ -48,33 +48,41 @@ Anchor on the *AI Agents: Instruction Validator* analysis for **altitude and lea
   - **Tables** carry the data contracts (events, properties, permission matrices) — extract them as contracts, not prose.
   - **Red callouts** = "not ready / don't build yet" or scope caveats; **yellow callouts** = engineering notes (URL routes for Pendo, strings needing translation). Surface both.
   - Anything under **Future Ideas and Scope** is out of scope — do not design for it (note it in `## Not needed` if it shaped a decision).
+- **Calibrate:** `notion-search` for a prior "… — Backend Tech Analysis" and skim one for altitude/leanness (see the intro). Don't copy its sections — copy its terseness.
 - Create the output page with **`notion-create-pages`**, `parent` **omitted** (→ a workspace-level, owner-only page) and `properties.title = "<PRD name> — Backend Tech Analysis"`. **Capture the returned page id/URL** — you write into it in Phase 4.
 - **Stage the PRD for the fan-outs:** `Write` the ingested PRD + relevant sub-pages, as a concise requirements digest, to a temp file **`prd-digest.md`**. Spawned explorer/reviewer agents can't reach Notion, so this file (not Notion) is the PRD source for Phases 3 and 5.
 - Incomplete / "stakeholder review" PRD → proceed best-effort, note gaps in To be discussed. If a proven prototype/POC exists, treat it as the algorithm reference and frame the analysis as the **port** into the backend.
 
-## Phase 3 — Explore the codebase (Workflow fan-out)
-Orient from the module-map `CLAUDE.md` + the relevant module's `CLAUDE.md`. Then run a **Workflow** of parallel **read-only** explorers (one per topic below), each working from the **repo + `prd-digest.md`** (staged in Phase 2; never the Notion MCP — spawned agents may not have it). Each returns a fixed structured shape: `{ area, summary, keyFiles:[{path, role}], facts:[<with file:line>], patterns:[…], gaps:[…] }`. Scale the fan-out to the PRD, but **never infer async-ness from the feature category — trace it.** The search explorer must follow the actual write path (direct index write vs a queued SQS → streamer → Redis → reindex flow); the async explorers are conditional on what that trace finds, not on whether the feature "sounds" like CRUD:
-- Owning service + data model + where config/state lives (and its limits, e.g. a `TEXT` cap).
-- **Persistence & migrations** (Sequelize/Dynamoose conventions) — first-class.
-- **Serializer/resource layer** — does it reshape payloads, read Redis, generate URLs? (a classic non-inert "reuse").
-- **Search** — does the feature touch OpenSearch (index mapping, analyzer, reindex/backfill, `create-index` script)?
-- Existing routes + the exact ACL/permission pattern (which policy gates what); the closest CRUD/flow prior-art to mirror end-to-end.
-- **Cross-service ripple** — a new actor/field/capability often touches services the PRD never names. Trace, for THIS feature: does it count toward billing/plan limits? appear in user/assignee dropdowns or pickers? show in reports, data export, or super-admin? get gated by a permission? emit/consume events other services read? Don't reuse a fixed checklist — derive it from what this feature actually introduces.
-- *(If async)* SQS/Lambda patterns + naming + the closest queue's config; the real-time/socket delivery path + channel convention.
-- *(If AI)* existing LLM infra (`@respond-io/ai` / `@respond-io/ai-agent`) — models, structured-output support, credit/tracing — from in-repo call sites.
+## Phase 3 — Explore the codebase (two-wave Workflow fan-out)
+Orient from the module-map `CLAUDE.md` + the relevant module's `CLAUDE.md`. All explorers are **read-only**, work from the **repo + `prd-digest.md`** (staged in Phase 2; never the Notion MCP — spawned agents may not have it), and return a fixed shape: `{ area, summary, keyFiles:[{path, role}], facts:[<with file:line>], patterns:[…], gaps:[…] }`.
 
-Synthesize before drafting; the design must be grounded in what exists.
+Run **two waves** — because which deep explorers you need *depends on facts you don't have yet*. Don't guess the fan-out up front; let wave 1 decide it.
+
+**Wave 1 — orient & trace (always these three):**
+- Owning service + data model + where config/state lives (and its limits, e.g. a `TEXT` cap); the closest CRUD/flow prior-art to mirror end-to-end.
+- **The write path, traced.** Find the write call site and follow it: direct repository write (sync) **or** an enqueue (SQS → streamer → Redis → reindex, async)? This single fact gates wave 2 — **never infer async-ness from the feature category.**
+- Existing routes + the exact ACL/permission pattern (which policy gates what).
+
+**Wave 2 — deep dives, spawned from wave-1 findings (only the ones that apply):**
+- **Persistence & migrations** — Sequelize/Dynamoose conventions, and **migration safety** if it alters a large existing table (online DDL / additive-nullable-then-backfill vs a blocking `ALTER`).
+- **Serializer/resource layer** — does it reshape payloads, read Redis, generate URLs? (a classic non-inert "reuse").
+- **Search** *(if wave 1 found an index touch)* — index mapping, analyzer, reindex/backfill, `create-index` script.
+- *(If wave 1 traced async)* SQS/Lambda patterns + naming + the closest queue's config; **handler idempotency** (the ~3-retry standard means a job WILL re-run — what makes re-execution safe?); the real-time/socket delivery path + channel convention.
+- *(If AI)* existing LLM infra (`@respond-io/ai` / `@respond-io/ai-agent`) — models, structured-output support, credit/tracing — from in-repo call sites.
+- **Cross-service ripple** — a new actor/field/capability often touches services the PRD never names. Trace, for THIS feature: does it count toward billing/plan limits? appear in user/assignee dropdowns or pickers? show in reports, data export, or super-admin? get gated by a permission? emit/consume events other services read? Don't reuse a fixed checklist — derive it from what this feature actually introduces.
+
+Synthesize both waves before drafting; the design must be grounded in what exists.
 
 ## Phase 4 — Draft into Notion
-Write into the page (captured in Phase 2) with **`notion-update-page`**: `command: insert_content` (pass `content`) to fill, or `command: replace_content` (pass `new_str`; set `allow_deleting_content` only deliberately) to rewrite. Use the **adaptive template** below.
+**The local file `draft.md` is the single source of truth; the Notion page is a render of it.** Write the full doc to `draft.md` first, then push it to the page (captured in Phase 2) with **one** `notion-update-page` `command: replace_content` (pass `new_str` = the whole doc; `allow_deleting_content: true`). Phase 5 edits `draft.md` and re-pushes the same way. **Never use `insert_content` to add sections in the loop** — appending across rounds duplicates content on the page; always rewrite from `draft.md`. Use the **adaptive template** below.
 Conventions: when an entity is **reused as-is**, say so; when **reused but modified**, mark the modified parts; **`~~strikethrough~~`** any existing table/route/field the new design supersedes, and **✅** anything the PRD says already exists/landed.
 Notion-flavored-markdown gotchas: toggle headings use `{toggle="true"}` and their children **must be tab-indented** (fence lines carry the indent; code content sits flush-left); tables use `<table>`/`<tr>`/`<td>`; keep every JSON payload **clean multi-line** (one field per line) so it doesn't overflow. If unsure of syntax, read the spec via `ReadMcpResourceTool(server="claude_ai_Notion", uri="notion://docs/enhanced-markdown-spec")` — do **not** route that URI through `notion-fetch`.
 
 ## Phase 5 — Review + validate-and-fill loop
-Stage the drafted doc to `draft.md` (reuse `prd-digest.md` from Phase 2). Run a **Workflow** of 5 **read-only** reviewer lenses, each reading those files AND verifying against the repo (`file:line`), each returning `{ lens, gaps:[{title, severity, where, problem, recommendation}], verdict }`:
-1. PRD coverage · 2. Concurrency & correctness · 3. API & data contract · 4. Security / ACL / tenancy / cost · 5. Ops / failure / rollout.
+Reviewers read `draft.md` + `prd-digest.md` AND verify against the repo (`file:line`). Run a **Workflow** of 5 **read-only** reviewer lenses, each returning `{ lens, gaps:[{title, severity, where, problem, recommendation}], verdict }`:
+1. PRD coverage · 2. Concurrency, correctness & **idempotency** (retried jobs, double-writes, race on the credit/lock) · 3. API & data contract · 4. Security / ACL / tenancy / cost · 5. Ops / failure / rollout / **migration safety**.
 
-Reviewers **return findings only — the main agent applies all Notion edits** (subagents don't edit the draft). For each finding: correctness/contract gap with a clear best answer → **fill the doc**; product/business-judgment or genuinely uncertain → **To-be-discussed row** (with a recommendation). Auto-fix high+medium; low → note.
+**Verify before you fill.** A reviewer's gap is a claim, not a fact — plausible-but-wrong findings will corrupt the doc if applied blindly. For each high/medium finding, do a cheap adversarial check: does it actually reproduce at the cited `file:line`? If it doesn't hold, drop it. Reviewers **return findings only — the main agent applies all edits to `draft.md`, then re-pushes via `replace_content`** (subagents touch neither the file nor Notion). For each surviving finding: correctness/contract gap with a clear best answer → **fill the doc**; product/business-judgment or genuinely uncertain → **To-be-discussed row** (with a recommendation). Auto-fix high+medium; low → note.
 **Loop:** track the round in TodoWrite and keep a seen-set of findings (dedup by `where`+claim). After filling, re-run the review; **stop when a round surfaces no new high/medium findings, hard cap 5 rounds** — at the cap, dump any remaining findings into To be discussed rather than looping.
 
 ## Phase 6 — Present
@@ -91,9 +99,9 @@ Intro: service + ACL policy + scoping + the per-route tenancy lookup (verify the
 - `## Socket` *(if any)* — an envelope code block (`channel`/`name`/`envelope`, one field per line), then `### <EventType> {toggle="true"}` each with clean multi-line JSON.
 
 ### # Infrastructure  *(describe each NEW resource concretely — the manager's inventory)*
-- `## Database` *(if persistence)* — table columns + **indexes sized to the real reads** + soft-delete (`paranoid: true`) + relationship (1-to-1 vs 1-to-many) and upsert/insert behavior; why this store.
+- `## Database` *(if persistence)* — table columns + **indexes sized to the real reads** + soft-delete (`paranoid: true`) + relationship (1-to-1 vs 1-to-many) and upsert/insert behavior; why this store. **Migration:** new table vs altering an existing one — if altering a large table, the safe path (additive nullable column → backfill → enforce) not a blocking `ALTER`.
 - `## Search (OpenSearch)` *(if used)* — index/alias, mapping + analyzer for new fields, write path (sync vs queued reindex), backfill/reindex plan for existing docs.
-- `## SQS` *(if async)* — queue names + the standard retry (`ReportBatchItemFailures`, ~3 retries, `VisibilityTimeout` + `MessageRetentionPeriod`, no DLQ) + BatchSize.
+- `## SQS` *(if async)* — queue names + the standard retry (`ReportBatchItemFailures`, ~3 retries, `VisibilityTimeout` + `MessageRetentionPeriod`, no DLQ) + BatchSize + **what makes the handler idempotent** (retries re-run the job — dedup key / conditional write / refund-on-failure).
 - `## Lambda` *(if async)* — function names + sizing; reference the flow section for logic.
 - `## Redis` *(if used)* — keys, values, TTL, lock semantics; any new cache primitive needed.
 - `## Access & cost` — tenancy + plan gate (universal); credit gating (where it decrements + refunds) and lock-concurrency *(only if applicable)*.
